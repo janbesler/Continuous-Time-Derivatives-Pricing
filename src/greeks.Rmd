@@ -1,0 +1,605 @@
+---
+title: "greeks"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Setup
+
+> ***libraries***
+
+before starting the work space is cleared and all necessary libraries are loaded.
+
+```{r setup, include=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+
+  # manipulate data
+library(tidyr)      # manipulating data
+library(dplyr)      # manipulating data
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data frames
+library(stringi)    # process charactar strings
+library(lubridate)  # transform character into dates
+
+  # statistics
+library(Matrix)     # required for lme4
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Part V
+
+For the ***Sensitivity Analysis*** three timestamps before the next valuation date are chosen. These timestamps are six, three and one month in advance of, in this case, *24.08.2022*.
+The Greeks are estimated just as before using a simulation with `N = 1000`.
+
+> The last date is changed to match with the latest data available, since original day is the day of handing in the modul
+
+```{r V_setup}
+# get indices for corresponding dates
+greekDates <- as.Date(c("2022-02-24", "2022-05-24", "2022-07-15"))
+  
+# define price range to use
+StockPriceRange <- seq(15, 55, 0.2)
+```
+
+Since the Greeks are different derivatives of the Black Scholes formula and this can not be implemented directly. The derivatives have to approximated by using numerical differentiation, in particular the method of *finite differences* has been chosen.
+
+### Delta
+
+##### Function
+
+To compute the finite differences for delta, the Certificate Price is adjusted by `+- 0.5`
+
+```{r delta}
+# define delta function
+Delta <- function(startPrice, riskFreeDaily, vola, T0, N){
+  # determine magnitude of change
+  finiteChange <- 0.5
+  # same computation used for Certificate Pricing as before
+    # store values used as index in vector
+  pathsResult <- matrix(data = NA, nrow = length(daysToMaturity), ncol = N)
+  CertPlus <- vector(mode = "numeric", length = length(StockPriceRange))
+  CertMinus <- vector(mode = "numeric", length = length(StockPriceRange))
+  
+# StockPrice + Change
+  StockPrice <- startPrice + finiteChange
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  CertPlus[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+
+# StockPrice - Change
+  StockPrice <- startPrice - finiteChange
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  CertMinus[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+  # return results
+  return(CertPlus[j] - CertMinus[j])
+}
+```
+
+##### Calculation
+
+Calculate Delta for each of the pre defined dates and each stock values defined in the Stockprice range.
+
+```{r Delta2}
+# create matrix to store values in
+DeltaMatrix <- matrix(
+  data = NA,
+  nrow = length(StockPriceRange),
+  ncol = length(greekDates)
+)
+  # helper matrices
+DeltaPlusMatrix <- matrix(
+  data = NA,
+  nrow = length(StockPriceRange),
+  ncol = length(greekDates)
+)
+DeltaMinusMatrix <- matrix(
+  data = NA,
+  nrow = length(StockPriceRange),
+  ncol = length(greekDates)
+)
+
+GreekData <- as.data.frame(matrix(data = NA, ncol = 10, nrow = length(greekDates)))
+colnames(GreekData) <- names(dataSim)
+  
+
+
+# extract rows for specified dates
+for (i in 1:length(greekDates)) {
+  GreekData[i, ] <-
+    dataSim[dataSim$Date == greekDates[i], ]
+  # define variables for simulation
+  riskFreeDaily <- GreekData$riskFreeDaily[[i]]
+  vola <-
+    GreekData$volaY2[[i]] / sqrt(240)  # use volatility scaled to daily value
+  T0 <- GreekData$untilmaturity[[i]]
+  # calculate for using the respective variables and StockPriceRange for startPrice and same N as before
+  for (j in 1:length(StockPriceRange)) {
+    DeltaMatrix[j, i] <- Delta(StockPriceRange[j],
+                                 riskFreeDaily,
+                                 vola,
+                                 T0,
+                                 N)
+  }
+}
+```
+
+##### Visualization
+
+Plot the different Delta against the stock price.
+
+```{r Delta3, warning=FALSE}
+# add stockprice column to matrix
+DeltaMatrix <- as.data.frame(cbind(DeltaMatrix, StockPriceRange))
+
+# plot Delta
+deltaplot <- ggplot(
+  data = DeltaMatrix,
+  aes(x = StockPriceRange)) +
+  geom_line(aes(y = V1, color = '6 months before observation date')) +
+  geom_line(aes(y = V2, color = '3 months before observation date')) +
+  geom_line(aes(y = V3, color = '~1 month before observation date')) +
+  geom_vline(xintercept = c(initialStockPrice, initialStockPrice * 0.6), linetype = 'dashed', color = 'black') +
+  xlim(25, 55) +
+  labs(x = "Stock Price", y = "") +
+  ggtitle("Delta",
+          "with Barrier and Strike Price") +
+  theme_bw(base_size = 15) +
+  theme(legend.position = c(0.75, 0.8),
+        legend.title = element_blank())
+
+# save plot 
+ggsave(
+  filename = "./figures/DeltaPlot.png",
+  dpi = 320
+)
+```
+
+### Gamma
+
+##### Function
+
+For the calculation of Gamma, the function `CertificatePrice + 0.5 - 2 * CertificatePrice + CertficatePrice - 0.5` is used.
+
+```{r gamma1}
+# define delta function
+Gamma <- function(startPrice, riskFreeDaily, vola, T0, N){
+  # determine magnitude of change
+  finiteChange <- 0.5
+  # same computation used for Certificate Pricing as before
+    # store values used as index in vector
+  pathsResult <- matrix(data = NA, nrow = length(daysToMaturity), ncol = N)
+  Cert <- vector(mode = "numeric", length = length(StockPriceRange))
+  CertPlus <- vector(mode = "numeric", length = length(StockPriceRange))
+  CertMinus <- vector(mode = "numeric", length = length(StockPriceRange))
+  
+# StockPrice
+  StockPrice <- startPrice
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  Cert[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+
+  
+# StockPrice + Change
+  StockPrice <- startPrice + finiteChange
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  CertPlus[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+
+# StockPrice - Change
+  StockPrice <- startPrice - finiteChange
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  CertMinus[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+  # return results
+  return(CertPlus[j] + 2*Cert[j] - CertMinus[j])
+}
+```
+
+##### Calculation
+
+```{r gamma2}
+# create matrix to store values in
+GammaMatrix <- matrix(
+  data = NA,
+  nrow = length(StockPriceRange),
+  ncol = length(greekDates)
+)
+
+# extract rows for specified dates
+for (i in 1:length(greekDates)) {
+  GreekData[i, ] <-
+    dataSim[dataSim$Date == greekDates[i], ]
+  # define variables for simulation
+  riskFreeDaily <- GreekData$riskFreeDaily[[i]]
+  vola <-
+    GreekData$volaY2[[i]] / sqrt(240)  # daily volatility value
+  T0 <- GreekData$untilmaturity[[i]]
+  # calculate for using the respective variables and StockPriceRange for startPrice and same N as before
+  for (j in 1:length(StockPriceRange)) {
+    GammaMatrix[j, i] <- Gamma(StockPriceRange[j],
+                                 riskFreeDaily,
+                                 vola,
+                                 T0,
+                                 N)
+  }
+}
+```
+
+##### Visualization
+
+Plot the different Gamma against the stock price.
+
+```{r Delta3, warning=FALSE}
+# add stockprice column to matrix
+GammaMatrix <- as.data.frame(cbind(GammaMatrix, StockPriceRange))
+
+# plot Delta
+gammaplot <- ggplot(
+  data = GammaMatrix,
+  aes(x = StockPriceRange)) +
+  geom_line(aes(y = V1, color = '6 months before observation date')) +
+  geom_line(aes(y = V2, color = '3 months before observation date')) +
+  geom_line(aes(y = V3, color = '~1 month before observation date')) +
+  geom_vline(xintercept = c(initialStockPrice, initialStockPrice * 0.6), linetype = 'dashed', color = 'black') +
+  xlim(25, 55) +
+  labs(x = "Stock Price", y = "") +
+  ggtitle("Gamma",
+          "with Barrier and Strike Price") +
+  theme_bw(base_size = 15) +
+  theme(legend.position = c(0.75, 0.2),
+        legend.title = element_blank())
+
+# save plot 
+ggsave(
+  filename = "./figures/GammaPlot.png",
+  dpi = 320
+)
+```
+
+### Vega
+
+##### Function
+
+For the calculation of Vega, the is volatility measures are changed.
+After trying different values the values *5%* and *45%* have been chosen.
+
+```{r vega1}
+# define delta function
+Vega <- function(startPrice, riskFreeDaily, vola, T0, N){
+  # determine magnitude of change
+  finiteChange <- 0.5
+  # same computation used for Certificate Pricing as before
+    # store values used as index in vector
+  pathsResult <- matrix(data = NA, nrow = length(daysToMaturity), ncol = N)
+  VolaLow <- vector(mode = "numeric", length = length(StockPriceRange))
+  VolaHigh <- vector(mode = "numeric", length = length(StockPriceRange))
+  
+# low volatility
+  StockPrice <- startPrice
+  volalow <- 0.05
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, volalow, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  VolaLow[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+
+# high volatility
+  StockPrice <- startPrice
+  volahigh <- 0.45
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, volahigh, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  VolaHigh[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+  # return results
+  return((VolaLow[j] - VolaHigh[j]) / (volahigh - volalow))
+}
+```
+
+##### Calculation
+
+```{r vega2}
+# create matrix to store values in
+VegaMatrix <- matrix(
+  data = NA,
+  nrow = length(StockPriceRange),
+  ncol = length(greekDates)
+)
+
+# extract rows for specified dates
+for (i in 1:length(greekDates)) {
+  GreekData[i, ] <-
+    dataSim[dataSim$Date == greekDates[i], ]
+  # define variables for simulation
+  riskFreeDaily <- GreekData$riskFreeDaily[[i]]
+  vola <-
+    GreekData$volaY2[[i]] / sqrt(240)  # daily volatility value
+  T0 <- GreekData$untilmaturity[[i]]
+  # calculate for using the respective variables and StockPriceRange for startPrice and same N as before
+  for (j in 1:length(StockPriceRange)) {
+    VegaMatrix[j, i] <- Vega(StockPriceRange[j],
+                                 riskFreeDaily,
+                                 vola,
+                                 T0,
+                                 N)
+  }
+}
+```
+
+##### Visualization
+
+Plot the different Gamma against the stock price.
+
+```{r vega3, warning=FALSE}
+# add stockprice column to matrix
+VegaMatrix <- as.data.frame(cbind(VegaMatrix, StockPriceRange))
+
+# plot Vega
+vegaplot <- ggplot(
+  data = VegaMatrix,
+  aes(x = StockPriceRange)) +
+  geom_line(aes(y = V1, color = '6 months before observation date')) +
+  geom_line(aes(y = V2, color = '3 months before observation date')) +
+  geom_line(aes(y = V3, color = '~1 month before observation date')) +
+  geom_vline(xintercept = c(initialStockPrice, initialStockPrice * 0.6), linetype = 'dashed', color = 'black') +
+  xlim(25, 55) +
+  labs(x = "Stock Price", y = "") +
+  ggtitle("Vega",
+          "with Barrier and Strike Price") +
+  theme_bw(base_size = 15) +
+  theme(legend.position = c(0.5, 0.2),
+        legend.title = element_blank())
+
+# save plot 
+ggsave(
+  filename = "./figures/VegaPlot.png",
+  dpi = 320
+)
+```
+
+
+### Theta
+
+##### Function
+
+For the calculation of Theta, the Certificate prices are compared to the prices one day closer to the expiration date.
+
+```{r theta1}
+# define delta function
+Theta <- function(startPrice, riskFreeDaily, vola, T0, N){
+  # same computation used for Certificate Pricing as before
+    # store values used as index in vector
+  pathsResult <- matrix(data = NA, nrow = length(daysToMaturity), ncol = N)
+  CertCurrent <- vector(mode = "numeric", length = length(StockPriceRange))
+  CertLagged <- vector(mode = "numeric", length = length(StockPriceRange))
+  
+# normal days to maturity
+  StockPrice <- startPrice
+  
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T0, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  CertCurrent[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+
+# lagged days to maturity
+  StockPrice <- startPrice
+  T1 <- T0 - 1
+    # same simulation as used previously
+  simulatedPaths <- simulation(StockPrice, riskFreeDaily, vola, T1, N)
+  # derive payoffs by looking at observation dates
+    # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  CertLagged[j] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+  # return results
+  return((CertCurrent[j] - CertLagged[j]) / (T1 - T0))
+}
+```
+
+##### Calculation
+
+```{r theta2}
+# create matrix to store values in
+ThetaMatrix <- matrix(
+  data = NA,
+  nrow = length(StockPriceRange),
+  ncol = length(greekDates)
+)
+
+# extract rows for specified dates
+for (i in 1:length(greekDates)) {
+  GreekData[i, ] <-
+    dataSim[dataSim$Date == greekDates[i], ]
+  # define variables for simulation
+  riskFreeDaily <- GreekData$riskFreeDaily[[i]]
+  vola <- GreekData$volaY2[[i]] / sqrt(240)  # daily volatility value
+  T0 <- GreekData$untilmaturity[[i]]
+  # calculate for using the respective variables and StockPriceRange for startPrice and same N as before
+  for (j in 1:length(StockPriceRange)) {
+    ThetaMatrix[j, i] <- Theta(StockPriceRange[j],
+                                 riskFreeDaily,
+                                 vola,
+                                 T0,
+                                 N)
+  }
+}
+```
+
+##### Visualization
+
+Plot the different Theta against the stock price.
+
+```{r theta3, warning=FALSE}
+# add stockprice column to matrix
+ThetaMatrix <- as.data.frame(cbind(ThetaMatrix, StockPriceRange))
+
+# plot Theta
+thetaplot <- ggplot(
+  data = ThetaMatrix,
+  aes(x = StockPriceRange)) +
+  geom_line(aes(y = V1, color = '6 months before observation date')) +
+  geom_line(aes(y = V2, color = '3 months before observation date')) +
+  geom_line(aes(y = V3, color = '~1 month before observation date')) +
+  geom_vline(xintercept = c(initialStockPrice, initialStockPrice * 0.6), linetype = 'dashed', color = 'black') +
+  xlim(25, 55) +
+  labs(x = "Stock Price", y = "") +
+  ggtitle("Theta",
+          "with Barrier and Strike Price") +
+  theme_bw(base_size = 15) +
+  theme(legend.position = c(0.75, 0.8),
+        legend.title = element_blank())
+
+# save plot 
+ggsave(
+  filename = "./figures/ThetaPlot.png",
+  dpi = 320
+)
+
+ggarrange(deltaplot, gammaplot,
+          vegaplot, thetaplot,
+          ncol = 2,
+          nrow = 2)
+ggsave("./figures/Greeks.png",
+       dpi= 320,
+       width = 14,
+       height = 7)
+
+```

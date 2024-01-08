@@ -1,0 +1,488 @@
+---
+title: "performance Analysis"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Setup
+
+> ***libraries***
+
+before starting the work space is cleared and all necessary libraries are loaded.
+
+```{r setup, include=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+
+  # manipulate data2
+library(tidyr)      # manipulating data2
+library(dplyr)      # manipulating data2
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data2 frames
+library(stringi)    # process charactar strings
+library(lubridate)  # transform character into dates
+
+  # statistics
+library(Matrix)     # required for lme4
+library(moments)    # skewness & curtosis
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+> For this task, assume a fictive investor with an investment horizon of T* = 1 year, planning to invest 10,000 euros. Assume that the investor has the possibility to invest in a stock or index, and put options for portfolio insurance purposes.
+
+# Part VI
+
+**Performance Analysis: without Risk Management**
+
+Choose an appropriate simulation approach to derive the payoff/return distribution at
+the end of the investment horizon T* of an investment in the stock/index. Calculate
+meaningful performance and risk measures and explain.
+
+The chosen simulation approach is a Geometric Brownian Motion, since this has been already been used for the previous parts of the assignment.
+
+### functions
+
+```{r VI_0}
+simulation <- function(
+    startPrice,  # Stock price at start of Simulation
+    riskFreeDaily,  # svensson risk free daily rate
+    vola,  # volatility
+    T0,  # time remaining until maturity/dates to simulate
+    N,  # number of paths
+    dT = 1./365
+){
+    # create matrix of randomly drawn numbers to make vectorizing possible
+      # use seed to keep randomization consistent
+    set.seed(123)
+  randomMatrix <- matrix(rnorm(N * T0), ncol = N, nrow = T0)
+    # Brownian Motion into Price Paths
+  BM <- exp((riskFreeDaily - vola * vola / 2) * dT + vola * randomMatrix * sqrt(dT))
+  BM <- apply(rbind(rep(startPrice, N), BM), 2, cumprod)
+  return(BM)
+}
+
+traidingDays <- c(240, 480)
+```
+
+### data & data frames
+
+At first the payoff distribution is calculated, using the already defined functions and data2 sets.
+
+```{r VI_1}
+# load Stock data2 of Morphosys AG & svensson parameters
+data2 <- read_csv("./data/dataPart2.csv",
+                 col_select = c(
+                   "Date",
+                   "Stock",
+                   "volaY1",
+                   "volaY2",
+                   "riskFreeDaily"
+                 ))
+# only keep newest date as start for simulation
+data2 <- data2[nrow(data2),]
+# set number of paths for brownian motion
+N = 1000
+
+# create table to store all results in.
+VariableInvest <- as.data.frame(matrix(data = NA,
+                     ncol = 6,  # position, mean return Underlying, vola, skewness, VaR-95, VaR-99
+                     nrow = 5))  # % of portfolio in position
+  # rename columns
+VariableInvest <- VariableInvest %>% rename(
+  'investment in Puts' = V1,
+  'mean return' = V2,
+  volatility = V3,
+  skewness = V4,
+  'VaR 95 %' = V5,
+  'VaR 99 %' = V6
+)
+  # fill position column
+VariableInvest$`investment in Puts` <- c("0 %", "3 %", "6 %", "9 %", "12 %")
+
+# create table to store all results in.
+VariableStrike <- as.data.frame(matrix(data = NA,
+                     ncol = 6,  # position, mean return Underlying, vola, skewness, VaR-95, VaR-99
+                     nrow = 10))  # number of Strike Prices + none
+  # rename columns
+VariableStrike <- VariableStrike %>% rename(
+  'Strike Price' = V1,
+  'mean return' = V2,
+  volatility = V3,
+  skewness = V4,
+  'VaR 95 %' = V5,
+  'VaR 99 %' = V6
+)
+  # fill position column
+VariableStrike[1:nrow(VariableStrike),"Strike Price"] <- seq(17.5, 22, .5)
+
+
+# amount of stocks and puts for different scenarios
+InvestmentScenarios <- as.data.frame(matrix(data = NA,
+                                            ncol = 5,
+                                            nrow = nrow(VariableInvest)))
+InvestmentScenarios <- InvestmentScenarios %>% rename(
+  "Stocks in Percent" = V1,
+  "Puts in Percent" = V2,
+  AmountStocks = V3,
+  AmountPuts = V4,
+  Cash = V5
+)
+InvestmentScenarios$`Stocks in Percent` <- c(100, 97, 94, 91, 88)
+InvestmentScenarios$`Puts in Percent` <- rep(100, 5) - InvestmentScenarios$`Stocks in Percent`
+
+# matrix to store scenarios in
+PortfolioReturnMatrix <- as.data.frame(matrix(data = NA, ncol = 3, nrow = N))
+PortfolioReturnMatrix <- PortfolioReturnMatrix %>% rename(
+  withoutPuts = V1,
+  StrikePrice = V2,
+  PutInvestment = V3
+)
+```
+
+### Return & Payoff
+
+```{r VI_2}
+# define required parameters
+startPrice <- unlist(data2[nrow(data2),"Stock"])
+riskFreeDaily <- unlist(data2[nrow(data2),"riskFreeDaily"])
+vola <- unlist(data2[nrow(data2),"volaY1"])
+T0 <- traidingDays[1]
+
+# simulate paths using Brownian Motion using previously defined function
+simulatedPaths <- simulation(startPrice, riskFreeDaily, vola, T0, N)
+
+
+# absolut difference/ payoff
+StockPayoffVector <- vector(mode = "numeric", length = N)
+StockPayoffVector <- (simulatedPaths[nrow(simulatedPaths),] - rep(startPrice, N)) 
+  # turn into data2 frame with one column & rename column
+StockPayoffMatrix <- as.data.frame(StockPayoffVector)
+StockPayoffMatrix <- rename(StockPayoffMatrix,
+                            payoff = StockPayoffVector)
+
+# Return
+StockReturnVector <- vector(mode = "numeric", length = N)
+StockReturnVector <- (simulatedPaths[nrow(simulatedPaths),] - rep(startPrice, N)) / rep(startPrice, N)
+  # turn into data2 frame with one column & rename column
+StockReturnMatrix <- as.data.frame(StockReturnVector)
+StockReturnMatrix <- rename(StockReturnMatrix,
+                            Return = StockReturnVector)
+
+PortfolioReturnMatrix$withoutPuts <- StockReturnVector
+```
+
+
+
+### performance and risk measures
+
+At last meaningful measures regarding the performance and risk measures are calculated. These include the mean return for performance and for risk measures the volatility, skewness and Value at Risk for 95% and 99%.
+
+The Value-at-Risk (VaR) provides an aggregate measure of risk by assessing worst-case scenarios. The historical (non-parametric) VaR is used.
+
+##### functions
+
+```{r VI_4}
+  # annual volatility - input is vector
+volatilityFunction <- function(PortfolioReturn) {
+  vola <- sqrt(var(PortfolioReturn)) * 100  # in percent
+  return(vola)
+}
+
+# value at risk - input is vector
+VaRFunction <- function(PortfolioReturn) {
+  # matrix to store all VaR in
+  VaRResult <- vector(mode = "numeric", length = 2)  # 2 elements for 95 & 99 VaR
+  # order input vector
+  VaRReturns <- sort(PortfolioReturn, decreasing = TRUE)
+  # pick quantiles percentile
+  VaRResult <- quantile(VaRReturns, probs = c(.05, .01)) * rep(100, 2)  # in percent
+  return(VaRResult)
+}
+```
+
+### Visualization
+
+In the second step the data2 is visualised as a Kernel Density Plot with a Histogram underneath to better show where the data2 is located.
+
+```{r VI_2, warning=FALSE}
+ggplot(
+  data = StockPayoffMatrix,
+  aes(x = payoff)) +
+  geom_histogram(aes(y = ..density..),
+                 bins = 100,
+                 color = 'darkblue',
+                 fill = 'white') +
+  geom_density(color = 'red',
+               fill = 'red',
+               alpha = 0.3,
+               linetype = 'dashed') +
+  labs(x = "Payoff in EUR",
+      y = "density") +
+  ggtitle("Density estimation of Portfolio Payoff") +
+  theme_minimal()
+
+# save the graph
+ggsave(
+  "./figures/PayoffDistribution.png",
+  dpi = 320
+)
+
+ggplot(data = StockReturnMatrix,
+       aes(x = Return)) +
+  geom_histogram(aes(y = ..density..),
+                 bins = 100,
+                 color = 'darkblue',
+                 fill = 'white') +
+  geom_density(
+    color = 'red',
+    fill = 'red',
+    alpha = 0.3,
+    linetype = 'dashed'
+  ) +
+  labs(x = "Return in %",
+       y = "density") +
+  ggtitle("Density estimation of Portfolio Return") +
+  theme_bw(base_size = 25)
+
+# save the graph
+ggsave(
+  "./figures/ReturnDistribution.png",
+  dpi = 320,
+  width = 21,
+  height = 10
+)
+```
+
+
+# Part VII
+
+**Performance Analysis: with Risk Management**
+
+Implement a portfolio insurance strategy by including put options to hedge the portfolio against downside risks. Consider fictitious puts, which prices are based on the historical volatility of the underlying, and analyze the impact of
+
+  - the fraction of initial wealth invested in put options, and
+  - the strike K of the put options
+
+on the performance and risk measures of the resulting portfolio. Illustrate and discuss your observations and compare them to the results of Problem VI.
+
+### functions
+
+```{r VII_1}
+# define Black Scholes Function for Put Pricing
+BlackScholes <-
+  function(StockPrice,
+           StrikePrice,
+           RiskFreeRate,
+           TimeToExpiration,
+           volatility) {
+    d1 <-
+      (log(StockPrice / StrikePrice) + (RiskFreeRate + volatility ^ 2 / 2) *
+         TimeToExpiration) / (volatility * sqrt(TimeToExpiration))
+    d2 <- d1 - volatility * sqrt(TimeToExpiration)
+    value <-
+      (
+        StrikePrice * exp(-RiskFreeRate * TimeToExpiration) * pnorm(-d2) - StockPrice *
+          pnorm(-d1)
+      )
+    return(value)
+  }
+
+# claculate volatility as log return - input single price (not first one though)
+logReturn <- function(StockPrice){
+  logVola <- sd(log(StockPrice[[-1]]) - log(StockPrice))  # daily stock return
+}
+```
+
+### calculations
+
+The time variant values such as volatility stay in their daily format, as the TimeToExpiration is also given on a daily basis.
+The volatility is calculated as the standard deviation of the returns for the given time frame. Here the simulated returns from Part VI are taken again.
+Since there is no riskfree Rate for the simulated paths, the average from the data used in for the Certificate is used as a mean as an approximation.
+
+```{r VII_2}
+# build fictitious put option
+StrikePriceSample <- as.numeric(VariableStrike[1:nrow(VariableStrike), "Strike Price"])
+  # create matrix to store results
+PutMatrix <- matrix(data = NA,
+                     ncol = 4,
+                     nrow = length(StrikePriceSample))
+PutMatrix[,1] <- StrikePriceSample
+colnames(PutMatrix) <- c("StrikePrice", "PriceBegininng", "PriceMaturity", "Return")
+
+  # calculate Put Option Prices at beginning of time window
+for(i in 1:length(StrikePriceSample)){
+  PutMatrix[i,2] <- BlackScholes(
+    StockPrice = unlist(data2[1, "Stock"]),
+    StrikePrice = unlist(StrikePriceSample[i]),
+    RiskFreeRate = unlist(data2[1, "riskFreeDaily"]),
+    TimeToExpiration = traidingDays[1],
+    volatility = unlist(data2[nrow(data2), "volaY1"]) / sqrt(traidingDays[1]))[1]
+}
+  # calculate Put Option Prices at maturity
+    # create matrix to store values in
+PutMaturity <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+    # riskfree Rate is approximated as the mean of all available dates from Part 1
+dataSim <- read_csv("./data/dataSim.csv")
+
+    # volatility as log return from Stock Prices
+vola1 <- vector(mode = "numeric", length = nrow(simulatedPaths)-1)
+diff <- vector(mode = "numeric", length = nrow(simulatedPaths)-1)
+volaSimulated <- matrix(data = NA, ncol = N, nrow = nrow(simulatedPaths)-1)
+# calculate the volatility for 1 year
+for(j in 1:N) {
+  for (i in 2:nrow(simulatedPaths)) {
+    diff[i - 1] <-
+      log(simulatedPaths[i - 1, j]) - log(simulatedPaths[i, j])  # daily stock return
+    vola1[i - 1] <-
+      sd(diff) * sqrt(traidingDays[1])  # standard deviation of stock return for year 1
+  }
+  volaSimulated[,j] <- vola1
+}
+
+for(i in 1:length(StrikePriceSample)){
+  for(j in 1:N){
+    PutMaturity[i,j] <- BlackScholes(
+      StockPrice = unlist(simulatedPaths[nrow(simulatedPaths), j]),
+      StrikePrice = unlist(StrikePriceSample[i]),
+      RiskFreeRate = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+      TimeToExpiration = .001,  # approximation to zero
+      volatility = unlist(volaSimulated[nrow(volaSimulated),j])
+      )[1]
+  }
+}
+
+  # calculate Gain and Loss for Put Options
+for(i in 1:length(StrikePriceSample)){
+    # calculate mean price of Put at Maturity 
+  PutMatrix[i,3] <- mean(PutMaturity[,i])
+  PutMatrix[i,4] <- PutMatrix[i,3] - PutMatrix[i,2]
+}
+
+# fill InvestmentScenario data frame
+for(i in 1:nrow(InvestmentScenarios)) {
+  InvestmentScenarios[i,"AmountStocks"] <-
+    floor(10000 * InvestmentScenarios[i, "Stocks in Percent"]/100 / data2$Stock)
+  InvestmentScenarios[i,"AmountPuts"] <-
+    floor(10000 * InvestmentScenarios[i, "Puts in Percent"]/100 / PutMatrix[PutMatrix[,"StrikePrice"] == 19,"PriceBegininng"])
+  InvestmentScenarios[i,"Cash"] <- 10000 - (InvestmentScenarios[i,"AmountStocks"] * data2$Stock + InvestmentScenarios[i,"AmountPuts"] * PutMatrix[PutMatrix[,"StrikePrice"] == 19,"PriceBegininng"])
+}
+```
+
+
+### Portfolio
+
+##### variable Puts
+
+varying the percentage of Puts in the investment & holding Strike Price constant.
+Strike price is chosen to be 19 (StrikePriceSample[4])
+
+```{r VII_3}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturity <- matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(j in 1:N){
+  for (i in 1:nrow(InvestmentScenarios)) {
+    PortfolioMaturity[i,j] <-
+      simulatedPaths[nrow(simulatedPaths),j] * InvestmentScenarios[i, "AmountStocks"] +
+      PutMaturity[4,j] * InvestmentScenarios[i, "AmountPuts"] +
+      InvestmentScenarios[i, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturn = matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(i in 1:nrow(PortfolioReturn)){
+  PortfolioReturn[i,] <- (PortfolioMaturity[i,] - rep(10000, N)) / rep(10000, N)
+}
+PortfolioReturnMatrix$PutInvestment <- PortfolioReturn[5,]
+
+# risk measures
+for(i in 1:nrow(VariableInvest)){
+  # mean return
+VariableInvest[i, "mean return"] <- mean(PortfolioReturn[i,])
+  # volatility
+VariableInvest[i, "volatility"] <- volatilityFunction(PortfolioReturn[i,])
+  # skewness
+VariableInvest[i, "skewness"] <- skewness(PortfolioReturn[i,])
+  # VaR 95%
+VariableInvest[i, "VaR 95 %"] <- VaRFunction(PortfolioReturn[i,])[1]
+  # VaR 99%
+VariableInvest[i, "VaR 99 %"] <- VaRFunction(PortfolioReturn[i,])[2]
+}
+```
+
+##### variable Strike Price
+
+Strike Price is varied, but Investment in Portfolio is hold constant for 6% of Puts
+
+```{r}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturity <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(j in 1:N){
+  for (i in 1:length(StrikePriceSample)) {
+    PortfolioMaturity[i,j] <-
+      simulatedPaths[nrow(simulatedPaths),j] * InvestmentScenarios[3, "AmountStocks"] +
+      PutMaturity[i,j] * InvestmentScenarios[3, "AmountPuts"] +
+      InvestmentScenarios[3, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturn = matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(i in 1:nrow(PortfolioReturn)){
+  PortfolioReturn[i,] <- (PortfolioMaturity[i,] - rep(10000, N)) / rep(10000, N)
+}
+PortfolioReturnMatrix$StrikePrice <- PortfolioReturn[2,]
+
+# risk measures
+for(i in 1:nrow(VariableStrike)){
+  # mean return
+VariableStrike[i, "mean return"] <- mean(PortfolioReturn[i,])
+  # volatility
+VariableStrike[i, "volatility"] <- volatilityFunction(PortfolioReturn[i,])
+  # skewness
+VariableStrike[i, "skewness"] <- skewness(PortfolioReturn[i,])
+  # VaR 95%
+VariableStrike[i, "VaR 95 %"] <- VaRFunction(PortfolioReturn[i,])[1]
+  # VaR 99%
+VariableStrike[i, "VaR 99 %"] <- VaRFunction(PortfolioReturn[i,])[2]
+}
+```
+
+### Visualization
+
+```{r plot_VII, eval=TRUE}
+ggplot(
+  data = PortfolioReturnMatrix) +
+  geom_density(aes(x = withoutPuts,
+               color = 'without Puts')) +
+  geom_density(aes(x = StrikePrice,
+               color = 'with 18 EUR Strike Price')) +
+  geom_density(aes(x = PutInvestment,
+               color = 'with 12% Puts')) +
+  labs(x = "Return in %",
+      y = "density") +
+  ggtitle("Density estimation of Portfolio Return",
+          "for different scenarios") +
+  xlim(-1,1.25) +
+  theme_bw(base_size = 25) +
+  theme(legend.position = c(0.8, 0.8),
+        legend.title = element_blank())
+
+# save the graph
+ggsave(
+  "./figures/PortfolioScenarios.png",
+  dpi = 320,
+  width = 21,
+  height = 7
+)
+```

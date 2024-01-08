@@ -1,0 +1,615 @@
+---
+title: "performance Analysis"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Setup
+
+> ***libraries***
+
+before starting the work space is cleared and all necessary libraries are loaded.
+
+```{r setup, include=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+
+  # manipulate data
+library(tidyr)      # manipulating data
+library(dplyr)      # manipulating data
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data frames
+library(stringi)    # process charactar strings
+library(lubridate)  # transform character into dates
+
+  # statistics
+library(Matrix)     # required for lme4
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+
+knitr::opts_chunk$set(echo = TRUE)
+
+# replicate data frames
+PortfolioReturnMatrixModified <- PortfolioReturnMatrix
+PutMatrixModified <- PutMatrix
+VariableInvestModified <- VariableInvest
+VariableStrikeModified <- VariableStrike
+
+# data frame to hold all changed variables
+FinalTable <- as.data.frame(matrix(data = NA,
+                     ncol = 7,  # properties, case, mean return, vola, skewness, VaR-95, VaR-99
+                     nrow = 12))  # 4*3 rows
+  # rename columns
+FinalTable <- FinalTable %>% rename(
+  Properties = V1,
+  Case = V2,
+  'mean return' = V3,
+  volatility = V4,
+  skewness = V5,
+  'VaR 95%' = V6,
+  'VaR 99%' = V7
+)
+  # fill position column
+FinalTable$Properties <- rep(c("without hedging", "12% Puts", "Strike Price = 18"),4)
+FinalTable$Case <- c(rep("base case",3),rep("-5% volatility",3), rep("-20% stock price",3),rep("+5% volatility & -20% stock price",3))
+
+FinalTable[1,3:7] <- VariableInvest[1,2:6]
+FinalTable[2,3:7] <- VariableInvest[5,2:6]
+FinalTable[3,3:7] <- VariableStrike[2,2:6]
+```
+
+# Part VIII
+
+For a specific portfolio allocation from Problem VII, consider that the volatility for pricing
+purposes of the options equals the historical volatility of the underlying ±5 percentage
+points and/or a sudden drop of the stock/index price by 20% after half a year. Compare
+the results and explain.
+
+Exemplary only one case from variable Investment and variable Strike Price are compared plus the base case.
+
+### Case 1
+
+> A 5 % drop in volatility. 
+
+##### Simulation
+
+At first the simulation has to be modified. For the riskfree Rate the same value is approximated as before in Task VII.
+The simulated values are cut in half and resumed from the cut part.
+
+```{r VIII_1}
+originalSimulation <- simulation(startPrice, riskFreeDaily, vola, T0, N)[1:floor(nrow(simulatedPaths)/2),]
+
+# create for each N one single simulation and add it back
+ResultMatrix <- matrix(data = NA, ncol = N, nrow = (nrow(simulatedPaths) - nrow(originalSimulation) + 1))
+for(j in 1:N){
+  ResultMatrix[,j] <- simulation(
+    startPrice = unlist(originalSimulation[nrow(originalSimulation),j]),
+    riskFreeDaily = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+    vola = unlist(volaSimulated[nrow(originalSimulation),j] - 0.05),  # minus 5% vola
+    T0 = nrow(simulatedPaths) - nrow(originalSimulation),
+    N = 1
+  )
+}
+modifiedSimulation <- rbind(originalSimulation, ResultMatrix[2:nrow(ResultMatrix),])
+```
+
+##### Puts
+
+only prices for maturity have to be calculated newly.
+
+```{r VIII_2}
+    # create matrix to store values in
+PutMaturityModified <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+    # riskfree Rate is approximated as the mean of all available dates from Part 1
+dataSim <- read_csv("./data/dataSim.csv")
+
+    # volatility as log return from Stock Prices
+vola1 <- vector(mode = "numeric", length = nrow(modifiedSimulation)-1)
+diff <- vector(mode = "numeric", length = nrow(modifiedSimulation)-1)
+volaSimulated <- matrix(data = NA, ncol = N, nrow = nrow(modifiedSimulation)-1)
+# calculate the volatility for 1 year
+for(j in 1:N) {
+  for (i in 2:nrow(modifiedSimulation)) {
+    diff[i - 1] <-
+      log(modifiedSimulation[i - 1, j]) - log(modifiedSimulation[i, j])  # daily stock return
+    vola1[i - 1] <-
+      sd(diff) * sqrt(traidingDays[1])  # standard deviation of stock return for year 1
+  }
+  volaSimulated[,j] <- vola1
+}
+
+for(i in 1:length(StrikePriceSample)){
+  for(j in 1:N){
+    PutMaturityModified[i,j] <- BlackScholes(
+      StockPrice = unlist(modifiedSimulation[nrow(modifiedSimulation), j]),
+      StrikePrice = unlist(StrikePriceSample[i]),
+      RiskFreeRate = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+      TimeToExpiration = .001,  # approximation to zero
+      volatility = unlist(volaSimulated[nrow(volaSimulated),j])
+      )[1]
+  }
+}
+  # calculate Gain and Loss for Put Options
+for(i in 1:length(StrikePriceSample)){
+    # calculate mean price of Put at Maturity 
+  PutMatrixModified[i,3] <- mean(PutMaturityModified[,i])
+  PutMatrixModified[i,4] <- PutMatrixModified[i,3] - PutMatrixModified[i,2]
+}
+```
+
+
+### Portfolio
+
+##### variable Strike Price
+
+```{r VIII_3}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturityModified <- matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(j in 1:N){
+  for (i in 1:nrow(InvestmentScenarios)) {
+    PortfolioMaturityModified[i,j] <-
+      modifiedSimulation[nrow(modifiedSimulation),j] * InvestmentScenarios[i, "AmountStocks"] +
+      PutMaturityModified[4,j] * InvestmentScenarios[i, "AmountPuts"] +
+      InvestmentScenarios[i, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturnModified = matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(i in 1:nrow(PortfolioReturnModified)){
+  PortfolioReturnModified[i,] <- (PortfolioMaturityModified[i,] - rep(10000, N)) / rep(10000, N)
+}
+PortfolioReturnMatrixModified$PutInvestment <- PortfolioReturnModified[5,]
+
+# risk measures
+for(i in 1:nrow(VariableInvestModified)){
+  # mean return
+VariableInvestModified[i, "mean return"] <- mean(PortfolioReturnModified[i,])
+  # volatility
+VariableInvestModified[i, "volatility"] <- volatilityFunction(PortfolioReturnModified[i,])
+  # skewness
+VariableInvestModified[i, "skewness"] <- skewness(PortfolioReturnModified[i,])
+  # VaR 95%
+VariableInvestModified[i, "VaR 95 %"] <- VaRFunction(PortfolioReturnModified[i,])[1]
+  # VaR 99%
+VariableInvestModified[i, "VaR 99 %"] <- VaRFunction(PortfolioReturnModified[i,])[2]
+}
+
+FinalTable[4,3:7] <- VariableInvestModified[1,2:6]
+FinalTable[5,3:7] <- VariableInvestModified[5,2:6]
+```
+
+##### variable Strike Price
+
+Strike Price is varied, but Investment in Portfolio is hold constant for 6% of Puts
+
+```{r}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturityModified <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(j in 1:N){
+  for (i in 1:length(StrikePriceSample)) {
+    PortfolioMaturityModified[i,j] <-
+      modifiedSimulation[nrow(modifiedSimulation),j] * InvestmentScenarios[3, "AmountStocks"] +
+      PutMaturityModified[i,j] * InvestmentScenarios[3, "AmountPuts"] +
+      InvestmentScenarios[3, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturnModified = matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(i in 1:nrow(PortfolioReturnModified)){
+  PortfolioReturnModified[i,] <- (PortfolioMaturityModified[i,] - rep(10000, N)) / PortfolioMaturityModified[i,]
+}
+PortfolioReturnMatrixModified$StrikePrice <- PortfolioReturnModified[2,]
+
+# risk measures
+for(i in 1:nrow(VariableStrikeModified)){
+  # mean return
+VariableStrikeModified[i, "mean return"] <- mean(PortfolioReturnModified[i,])
+  # volatility
+VariableStrikeModified[i, "volatility"] <- volatilityFunction(PortfolioReturnModified[i,])
+  # skewness
+VariableStrikeModified[i, "skewness"] <- skewness(PortfolioReturnModified[i,])
+  # VaR 95%
+VariableStrikeModified[i, "VaR 95 %"] <- VaRFunction(PortfolioReturnModified[i,])[1]
+  # VaR 99%
+VariableStrikeModified[i, "VaR 99 %"] <- VaRFunction(PortfolioReturnModified[i,])[2]
+}
+
+FinalTable[6,3:7] <- VariableStrikeModified[2,2:6]
+```
+
+### Visualization
+
+```{r plot_VIII_case1, eval=TRUE}
+ggplot(
+  data = PortfolioReturnMatrixModified) +
+  geom_density(aes(x = withoutPuts,
+               color = 'without Puts')) +
+  geom_density(aes(x = StrikePrice,
+               color = 'with 18 EUR Strike Price')) +
+  geom_density(aes(x = PutInvestment,
+               color = 'with 12% Puts')) +
+  labs(x = "Return in EUR",
+      y = "density") +
+  ggtitle("Density estimation of Portfolio Return",
+          "-5% volatility") +
+  xlim(-1,1) +
+  theme_bw(base_size = 25) +
+  theme(legend.position = c(0.8, 0.8),
+        legend.title = element_blank())
+
+# save the graph
+ggsave(
+  "./figures/PartVIII_case1.png",
+  dpi = 320,
+  width = 11,
+  height = 7
+)
+```
+
+### Case 2
+
+> A 20 % drop in the stock price. 
+
+##### Simulation
+
+At first the simulation has to be modified. For the riskfree Rate the same value is approximated as before in Task VII.
+The simulated values are cut in half and resumed from the cut part.
+
+```{r VIII_1}
+# create for each N one single simulation and add it back
+for(j in 1:N){
+  ResultMatrix[,j] <- simulation(
+    startPrice = unlist(originalSimulation[nrow(originalSimulation),j]  * 0.8),  # 20% percent drop
+    riskFreeDaily = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+    vola = unlist(volaSimulated[nrow(originalSimulation),j]),
+    T0 = nrow(simulatedPaths) - nrow(originalSimulation),
+    N = 1
+  )
+}
+modifiedSimulation <- rbind(originalSimulation, ResultMatrix[2:nrow(ResultMatrix),])
+```
+
+##### Puts
+
+only prices for maturity have to be calculated newly.
+
+```{r VIII_2}
+    # create matrix to store values in
+PutMaturityModified <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+    # riskfree Rate is approximated as the mean of all available dates from Part 1
+dataSim <- read_csv("./data/dataSim.csv")
+
+    # volatility as log return from Stock Prices
+vola1 <- vector(mode = "numeric", length = nrow(modifiedSimulation)-1)
+diff <- vector(mode = "numeric", length = nrow(modifiedSimulation)-1)
+volaSimulated <- matrix(data = NA, ncol = N, nrow = nrow(modifiedSimulation)-1)
+# calculate the volatility for 1 year
+for(j in 1:N) {
+  for (i in 2:nrow(modifiedSimulation)) {
+    diff[i - 1] <-
+      log(modifiedSimulation[i - 1, j]) - log(modifiedSimulation[i, j])  # daily stock return
+    vola1[i - 1] <-
+      sd(diff) * sqrt(traidingDays[1])  # standard deviation of stock return for year 1
+  }
+  volaSimulated[,j] <- vola1
+}
+
+for(i in 1:length(StrikePriceSample)){
+  for(j in 1:N){
+    PutMaturityModified[i,j] <- BlackScholes(
+      StockPrice = unlist(modifiedSimulation[nrow(modifiedSimulation), j]),
+      StrikePrice = unlist(StrikePriceSample[i]),
+      RiskFreeRate = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+      TimeToExpiration = .001,  # approximation to zero
+      volatility = unlist(volaSimulated[nrow(volaSimulated),j])
+      )[1]
+  }
+}
+  # calculate Gain and Loss for Put Options
+for(i in 1:length(StrikePriceSample)){
+    # calculate mean price of Put at Maturity 
+  PutMatrixModified[i,3] <- mean(PutMaturityModified[,i])
+  PutMatrixModified[i,4] <- PutMatrixModified[i,3] - PutMatrixModified[i,2]
+}
+```
+
+
+### Portfolio
+
+##### variable Strike Price
+
+```{r VIII_3}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturityModified <- matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(j in 1:N){
+  for (i in 1:nrow(InvestmentScenarios)) {
+    PortfolioMaturityModified[i,j] <-
+      modifiedSimulation[nrow(modifiedSimulation),j] * InvestmentScenarios[i, "AmountStocks"] +
+      PutMaturityModified[4,j] * InvestmentScenarios[i, "AmountPuts"] +
+      InvestmentScenarios[i, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturnModified = matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(i in 1:nrow(PortfolioReturnModified)){
+  PortfolioReturnModified[i,] <- (PortfolioMaturityModified[i,] - rep(10000, N)) / rep(10000, N)
+}
+PortfolioReturnMatrixModified$PutInvestment <- PortfolioReturnModified[5,]
+
+# risk measures
+for(i in 1:nrow(VariableInvestModified)){
+  # mean return
+VariableInvestModified[i, "mean return"] <- mean(PortfolioReturnModified[i,])
+  # volatility
+VariableInvestModified[i, "volatility"] <- volatilityFunction(PortfolioReturnModified[i,])
+  # skewness
+VariableInvestModified[i, "skewness"] <- skewness(PortfolioReturnModified[i,])
+  # VaR 95%
+VariableInvestModified[i, "VaR 95 %"] <- VaRFunction(PortfolioReturnModified[i,])[1]
+  # VaR 99%
+VariableInvestModified[i, "VaR 99 %"] <- VaRFunction(PortfolioReturnModified[i,])[2]
+}
+
+FinalTable[7,3:7] <- VariableInvestModified[1,2:6]
+FinalTable[8,3:7] <- VariableInvestModified[5,2:6]
+```
+
+##### variable Strike Price
+
+Strike Price is varied, but Investment in Portfolio is hold constant for 6% of Puts
+
+```{r}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturityModified <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(j in 1:N){
+  for (i in 1:length(StrikePriceSample)) {
+    PortfolioMaturityModified[i,j] <-
+      modifiedSimulation[nrow(modifiedSimulation),j] * InvestmentScenarios[3, "AmountStocks"] +
+      PutMaturityModified[i,j] * InvestmentScenarios[3, "AmountPuts"] +
+      InvestmentScenarios[3, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturnModified = matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(i in 1:nrow(PortfolioReturnModified)){
+  PortfolioReturnModified[i,] <- (PortfolioMaturityModified[i,] - rep(10000, N)) / PortfolioMaturityModified[i,]
+}
+PortfolioReturnMatrixModified$StrikePrice <- PortfolioReturnModified[2,]
+
+# risk measures
+for(i in 1:nrow(VariableStrikeModified)){
+  # mean return
+VariableStrikeModified[i, "mean return"] <- mean(PortfolioReturnModified[i,])
+  # volatility
+VariableStrikeModified[i, "volatility"] <- volatilityFunction(PortfolioReturnModified[i,])
+  # skewness
+VariableStrikeModified[i, "skewness"] <- skewness(PortfolioReturnModified[i,])
+  # VaR 95%
+VariableStrikeModified[i, "VaR 95 %"] <- VaRFunction(PortfolioReturnModified[i,])[1]
+  # VaR 99%
+VariableStrikeModified[i, "VaR 99 %"] <- VaRFunction(PortfolioReturnModified[i,])[2]
+}
+
+FinalTable[9,3:7] <- VariableStrikeModified[2,2:6]
+```
+
+### Visualization
+
+```{r plot_VIII_case1, eval=TRUE}
+ggplot(
+  data = PortfolioReturnMatrixModified) +
+  geom_density(aes(x = withoutPuts,
+               color = 'without Puts')) +
+  geom_density(aes(x = StrikePrice,
+               color = 'with 18 EUR Strike Price')) +
+  geom_density(aes(x = PutInvestment,
+               color = 'with 12% Puts')) +
+  labs(x = "Return in EUR",
+      y = "density") +
+  ggtitle("Density estimation of Portfolio Return",
+          "-20% stock price") +
+  xlim(-1,1) +
+  theme_bw(base_size = 25) +
+  theme(legend.position = c(0.8, 0.8),
+        legend.title = element_blank())
+
+# save the graph
+ggsave(
+  "./figures/PartVIII_case2.png",
+  dpi = 320,
+  width = 11,
+  height = 7
+)
+```
+
+
+### Case 3
+
+> A 20 % drop in the stock price and a 5% increase in volatility. 
+
+##### Simulation
+
+At first the simulation has to be modified. For the riskfree Rate the same value is approximated as before in Task VII.
+The simulated values are cut in half and resumed from the cut part.
+
+```{r VIII_1}
+# create for each N one single simulation and add it back
+for(j in 1:N){
+  ResultMatrix[,j] <- simulation(
+    startPrice = unlist(originalSimulation[nrow(originalSimulation),j] * 0.8),  # 20% percent drop
+    riskFreeDaily = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+    vola = unlist(volaSimulated[nrow(originalSimulation),j] + 0.05),  # vola increase + 5%
+    T0 = nrow(simulatedPaths) - nrow(originalSimulation),
+    N = 1
+  )
+}
+modifiedSimulation <- rbind(originalSimulation, ResultMatrix[2:nrow(ResultMatrix),])
+```
+
+##### Puts
+
+only prices for maturity have to be calculated newly.
+
+```{r VIII_2}
+    # create matrix to store values in
+PutMaturityModified <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+    # riskfree Rate is approximated as the mean of all available dates from Part 1
+dataSim <- read_csv("./data/dataSim.csv")
+
+    # volatility as log return from Stock Prices
+vola1 <- vector(mode = "numeric", length = nrow(modifiedSimulation)-1)
+diff <- vector(mode = "numeric", length = nrow(modifiedSimulation)-1)
+volaSimulated <- matrix(data = NA, ncol = N, nrow = nrow(modifiedSimulation)-1)
+# calculate the volatility for 1 year
+for(j in 1:N) {
+  for (i in 2:nrow(modifiedSimulation)) {
+    diff[i - 1] <-
+      log(modifiedSimulation[i - 1, j]) - log(modifiedSimulation[i, j])  # daily stock return
+    vola1[i - 1] <-
+      sd(diff) * sqrt(traidingDays[1])  # standard deviation of stock return for year 1
+  }
+  volaSimulated[,j] <- vola1
+}
+
+for(i in 1:length(StrikePriceSample)){
+  for(j in 1:N){
+    PutMaturityModified[i,j] <- BlackScholes(
+      StockPrice = unlist(modifiedSimulation[nrow(modifiedSimulation), j]),
+      StrikePrice = unlist(StrikePriceSample[i]),
+      RiskFreeRate = mean(dataSim$riskFreeDaily, na.rm = TRUE),
+      TimeToExpiration = .001,  # approximation to zero
+      volatility = unlist(volaSimulated[nrow(volaSimulated),j])
+      )[1]
+  }
+}
+  # calculate Gain and Loss for Put Options
+for(i in 1:length(StrikePriceSample)){
+    # calculate mean price of Put at Maturity 
+  PutMatrixModified[i,3] <- mean(PutMaturityModified[,i])
+  PutMatrixModified[i,4] <- PutMatrixModified[i,3] - PutMatrixModified[i,2]
+}
+```
+
+
+### Portfolio
+
+##### variable Strike Price
+
+```{r VIII_3}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturityModified <- matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(j in 1:N){
+  for (i in 1:nrow(InvestmentScenarios)) {
+    PortfolioMaturityModified[i,j] <-
+      modifiedSimulation[nrow(modifiedSimulation),j] * InvestmentScenarios[i, "AmountStocks"] +
+      PutMaturityModified[4,j] * InvestmentScenarios[i, "AmountPuts"] +
+      InvestmentScenarios[i, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturnModified = matrix(data = NA, ncol = N, nrow = nrow(InvestmentScenarios))
+for(i in 1:nrow(PortfolioReturnModified)){
+  PortfolioReturnModified[i,] <- (PortfolioMaturityModified[i,] - rep(10000, N)) / rep(10000, N)
+}
+PortfolioReturnMatrixModified$PutInvestment <- PortfolioReturnModified[5,]
+
+# risk measures
+for(i in 1:nrow(VariableInvestModified)){
+  # mean return
+VariableInvestModified[i, "mean return"] <- mean(PortfolioReturnModified[i,])
+  # volatility
+VariableInvestModified[i, "volatility"] <- volatilityFunction(PortfolioReturnModified[i,])
+  # skewness
+VariableInvestModified[i, "skewness"] <- skewness(PortfolioReturnModified[i,])
+  # VaR 95%
+VariableInvestModified[i, "VaR 95 %"] <- VaRFunction(PortfolioReturnModified[i,])[1]
+  # VaR 99%
+VariableInvestModified[i, "VaR 99 %"] <- VaRFunction(PortfolioReturnModified[i,])[2]
+}
+
+FinalTable[10,3:7] <- VariableInvestModified[1,2:6]
+FinalTable[11,3:7] <- VariableInvestModified[5,2:6]
+```
+
+##### variable Strike Price
+
+Strike Price is varied, but Investment in Portfolio is hold constant for 6% of Puts
+
+```{r}
+# calculate portfolio value (positions * price) at maturity - different for each N
+PortfolioMaturityModified <- matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(j in 1:N){
+  for (i in 1:length(StrikePriceSample)) {
+    PortfolioMaturityModified[i,j] <-
+      modifiedSimulation[nrow(modifiedSimulation),j] * InvestmentScenarios[3, "AmountStocks"] +
+      PutMaturityModified[i,j] * InvestmentScenarios[3, "AmountPuts"] +
+      InvestmentScenarios[3, "Cash"]
+  }
+}
+
+# mean return from both portfolio values
+PortfolioReturnModified = matrix(data = NA, ncol = N, nrow = length(StrikePriceSample))
+for(i in 1:nrow(PortfolioReturnModified)){
+  PortfolioReturnModified[i,] <- (PortfolioMaturityModified[i,] - rep(10000, N)) / PortfolioMaturityModified[i,]
+}
+PortfolioReturnMatrixModified$StrikePrice <- PortfolioReturnModified[2,]
+
+# risk measures
+for(i in 1:nrow(VariableStrikeModified)){
+  # mean return
+VariableStrikeModified[i, "mean return"] <- mean(PortfolioReturnModified[i,])
+  # volatility
+VariableStrikeModified[i, "volatility"] <- volatilityFunction(PortfolioReturnModified[i,])
+  # skewness
+VariableStrikeModified[i, "skewness"] <- skewness(PortfolioReturnModified[i,])
+  # VaR 95%
+VariableStrikeModified[i, "VaR 95 %"] <- VaRFunction(PortfolioReturnModified[i,])[1]
+  # VaR 99%
+VariableStrikeModified[i, "VaR 99 %"] <- VaRFunction(PortfolioReturnModified[i,])[2]
+}
+
+FinalTable[12,3:7] <- VariableStrikeModified[2,2:6]
+```
+
+### Visualization
+
+```{r plot_VIII_case1, eval=TRUE}
+ggplot(
+  data = PortfolioReturnMatrixModified) +
+  geom_density(aes(x = withoutPuts,
+               color = 'without Puts')) +
+  geom_density(aes(x = StrikePrice,
+               color = 'with 18 EUR Strike Price')) +
+  geom_density(aes(x = PutInvestment,
+               color = 'with 12% Puts')) +
+  labs(x = "Return in EUR",
+      y = "density") +
+  ggtitle("Density estimation of Portfolio Return",
+          "-20% stock price & +5% volatility") +
+  xlim(-1,1.25) +
+  theme_bw(base_size = 25)
+  theme(legend.position = c(0.8, 0.8),
+        legend.title = element_blank())
+
+# save the graph
+ggsave(
+  "./figures/PartVIII_case3.png",
+  dpi = 320,
+  height = 7,
+  width = 11
+)
+
+FinalTable
+```

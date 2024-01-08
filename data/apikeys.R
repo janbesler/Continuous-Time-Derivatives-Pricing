@@ -1,0 +1,1 @@
+nasdaq_key <- "NVP2tbszpCSA_Wsddmpm"

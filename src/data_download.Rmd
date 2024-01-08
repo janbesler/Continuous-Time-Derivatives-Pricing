@@ -1,0 +1,116 @@
+---
+title: "data_download"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+### setup
+
+```{r setup, include=FALSE}
+# load necessary libraries
+library(lubridate)
+library(readr)
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# stock and certificate prices
+
+download the needed historical data from [yahoo finance](https://finance.yahoo.com/) and [onvista](https://www.onvista.de/derivate/Express-Zertifikate/handelsplaetze/204517484-UBS1KS-DE000UBS1KS0)
+
+> The company is not paying a dividend to its shareholders a stated in the latest financial report for 2021.
+*https://www.morphosys.com/sites/reports/en/gb/2021/*
+
+```{r download}
+# download newest stock data
+MOR <-
+  read_csv(url(
+    paste0(
+      "https://query1.finance.yahoo.com/v7/finance/download/MOR.DE?period1=1524096000&period2=",
+      as.integer(as.POSIXct(Sys.time())),
+      "&interval=1d&events=history&includeAdjustedClose=true"
+    )
+  ), lazy = FALSE)
+
+# load the api keys
+source("./data/apikeys.R")
+# read in the downloaded csv file
+ExZ <- read_csv2("./data/ExZ_Data_latest.csv", col_names = TRUE)
+  
+
+# remove duplicates
+MOR <- MOR[!duplicated(MOR$Date), ]
+```
+
+### tidy data
+
+tidy the data to make the columns compatible later on.
+
+```{r tidying}
+sapply(MOR, class)
+sapply(ExZ, class)
+
+# change 'Datum' type since 'Date' and 'Datum' are not the same type
+ExZ$Datum <- as.Date(parse_date_time(ExZ$Datum, c('dmy', 'ymd')))
+sapply(ExZ, class)
+```
+
+### save data
+
+store the data as csv files in the data folder
+
+```{r store}
+write_csv(MOR, "./data/MOR.csv", col_names = TRUE)
+
+write_csv(ExZ, "./data/ExZ_Data.csv", col_names = TRUE)
+```
+
+# download the svensson parameters
+
+The data is downloaded from [Bundesbank](https://www.bundesbank.de/dynamic/action/en/statistics/time-series-databases/time-series-databases/759784/759784?listId=www_skms_it03c)
+The data starts at the 01.08.1997
+```{r svensson, warning=FALSE}
+startDate <- "1997-08-01"
+
+# list all required parameters
+svenssonParameters <- c("B0", "B1", "B2", "B3", "T1", "T2")
+
+# data frame dimensions
+i = 13
+j = length(seq(as.Date(startDate), as.Date(Sys.time()), by = 'day')) - 2
+  
+# build empty data frame
+svensson <- data.frame(matrix(NA, nrow = j, ncol = i))
+
+# loop to download all necessary parameters and store in a single data frame
+for(i in 1:length(svenssonParameters)){
+svenssonRaw <- read_csv(url(
+  paste0("https://api.statistiken.bundesbank.de/rest/download/BBSIS/D.I.ZST.",
+  svenssonParameters[i],
+  ".EUR.S1311.B.A604._Z.R.A.A._Z._Z.A?format=csv&lang=en")),
+  lazy = FALSE,
+  na = c(".", "No value available", "Kein Wert vorhanden", "NA", NA),
+  skip = 8,
+  col_names = FALSE)
+# store in data frame
+svensson[,(i*2):(i*2+1)] <- svenssonRaw[,1:2]
+}
+
+# tidying the data set
+svensson <- svensson[,-c(1, 4, 6, 8, 10, 12)]
+colnames(svensson)[c(1:7)] <- c("Date", "b0", "b1", "b2", "b3", "t1", "t2")
+svensson <- svensson[!(is.na(svensson$b0)),]
+
+# save the table as csv
+write_csv(svensson, "./data/svensson.csv", col_names = TRUE)
+```
+
+```{r stock_rm}
+rm(
+  ExZ,
+  MOR,
+  svensson,
+  svenssonParameters,
+  svenssonRaw
+)
+```

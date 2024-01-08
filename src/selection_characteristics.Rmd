@@ -1,0 +1,157 @@
+---
+title: "selection characteristics"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+### Setup
+
+> ***libraries***
+
+before starting the work space is cleared and all necessary libraries are loaded.
+
+```{r setup, include=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+library(readxl)     # reading excel
+library(foreign)    # read in Stata, SPSS & SAS files
+library(haven)      # read in Stata, SPSS & SAS files
+library(DBI)        # connecting database
+library(RSQLite)    # sql support
+library(jsonlite)   # using APIs
+library(httr)       # using APIs
+library(rvest)      # webscraping
+library(xml2)       # parse xml code
+library(here)       # help with relative paths in r projects
+
+  # manipulate data
+library(tidyr)      # manipulating data
+library(dplyr)      # manipulating data
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data frames
+library(stringi)    # process charactar strings
+
+  # statistics
+library(Matrix)     # required for lme4
+library(lme4)       # used for multilevel modeling
+library(lfe)        # fixed effect regression
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+library(ggpubr)     # combine multiple graphs into one
+library(ggrepel)    # describe lines in graph
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Company
+
+> the company of interest is ***MorphoSys AG*** (ISIN:DE0006632003) with the [Express Certificate](https://keyinvest-de.ubs.com/produkt/detail/index/isin/DE000UBS1KS0) (ISIN:DE000UBS1KS0) from UBS
+
+the express certificate has the following early redemption observation dates:
+
+-   24^th^ August 2022 = j1
+-   24^th^ August 2023 = j2
+-   26^th^ August 2024 = j3
+-   25^th^ August 2025 = j4
+
+and the maturity date of 31^st^ August 2026
+
+parameters:
+
+-   kick in level at 60% of emission price
+-   emission price 100 €
+-   coupon of 10,15 € times year of maturity
+-   early redemption level:
+    -   j1 = 100 %
+    -   j2 = 90 %
+    -   j3 = 80 %
+    -   j4 = 70 % in reference to intial price
+
+At first the payoff function has to be defined with the parameters taken from a [term sheet](https://keyinvest-de.ubs.com/filedb/deliver/xuuid/g001aa76ff7bc23a9fe6b2eecba79034fc0b/name/DE000UBS1KS0_Endg%C3%BCltige+Bedingungen_en.pdf) from UBS
+
+```{r part_I}
+# the values for these parameters are
+initial_price <- 48.68
+barrier <- 0.6*initial_price
+coupon <- 10.15
+
+# define the theoretical payoff function
+payoff <- function(p, year) {
+  if (p < (initial_price * (1.1 - year*0.1)))
+    p
+  else #(p >= initial_price * (1.1 - year*0.1))
+    100 + year*coupon
+}
+
+MORExZ <- data.frame(stock_price = c(1:175),
+                     payoff_y1 = NA,
+                     payoff_y2 = NA,
+                     payoff_y3 = NA,
+                     payoff_y4 = NA,
+                     payoff_maturity = NA)
+for(j in 1:nrow(MORExZ)) {
+  for (i in 1:5) {
+    MORExZ[j, i + 1] <- payoff(p = MORExZ$stock_price[[j]], year = i)
+  }
+}
+# change x values to be closer to previous values at observation dates
+MORExZ[30,1] <- 29.001
+MORExZ[35,1] <- 34.001
+MORExZ[39,1] <- 38.001
+MORExZ[44,1] <- 43.001
+MORExZ[49,1] <- 48.001
+```
+
+```{r part_II}
+# visualization of payoff
+ggplot(data = MORExZ,
+       aes(x = stock_price)) +
+  # stock price line
+  geom_line(aes(y = stock_price,
+                color = 'underlying'),
+            linetype = 'twodash') +
+  # payoff at j1 (first early payoff)
+  geom_line(aes(y = payoff_y1,
+                color = 'early payoff year 1'),
+            linetype = 'longdash') +
+  # payoff at j2 (second early payoff)
+  geom_line(aes(y = payoff_y2,
+                color = 'early payoff year 2'),
+            linetype = 'longdash') +
+  # payoff at j3 (third early payoff)
+  geom_line(aes(y = payoff_y3,
+                color = 'early payoff year 3'),
+            linetype = 'longdash') +
+  # payoff at j4 (third early payoff)
+  geom_line(aes(y = payoff_y4,
+                color = 'early payoff year 4'),
+            linetype = 'longdash') +
+  # derivitive payoff at maturity
+  geom_line(aes(y = payoff_maturity,
+                color = 'payoff maturity'),
+            linetype = 'solid') +
+  # naming the axis and legend
+  ylab("derivative payoff (EUR)") +
+  xlab("stock price (EUR)") +
+  theme_bw(base_size = 25) +
+  theme(legend.position = c(0.85, 0.25),
+        legend.title = element_blank()) +
+  ggtitle("Payoff structure of Express Certificate")
+
+# save the figure
+ggsave(filename = "./figures/theoryPayoff.png", dpi = 320, width = 21, height = 7)
+```
+
+```{r part_I_II}
+rm(
+  theoryPayoff,
+  MORExZ
+)
+```

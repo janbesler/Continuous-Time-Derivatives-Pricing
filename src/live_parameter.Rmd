@@ -1,0 +1,494 @@
+---
+title: "Parameter selection & valuation"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Setup
+
+> ***libraries***
+
+before starting the work space is cleared and all necessary libraries are loaded.
+
+```{r setup, include=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+
+  # manipulate data
+library(tidyr)      # manipulating data
+library(dplyr)      # manipulating data
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data frames
+library(stringi)    # process charactar strings
+library(lubridate)  # transform character into dates
+
+  # statistics
+library(Matrix)     # required for lme4
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# real data
+
+inspect the data frames before working with them
+
+```{r preperation}
+data <- read_csv("./data/MOR.csv",
+                col_select = c("Date", "Stock"),
+                col_names = c("Date", "Stock"),
+                skip = 1)
+ExZ <- read_csv("./data/ExZ_Data.csv",
+                col_select = c("Date", "Certificate"),
+                col_names = c("Date", "Certificate"),
+                skip = 1)
+
+dim(data)
+head(data, 5)
+
+dim(ExZ)
+head(ExZ, 5)
+
+# look at data and classes
+glimpse(data)
+```
+
+# Volatility
+
+The volatility is calculated as the rolling standard deviation of the stock return.
+
+```{r vola}
+# define the number of trading Days for one and two years
+traidingDays <- c(240, 480)
+
+# create empty vectors to store the values
+vola1 <- vector(mode = "numeric", length = length(data$Stock))
+vola2 <- vector(mode = "numeric", length = length(data$Stock))
+diff <- vector(mode = "numeric", length = length(data$Stock))
+
+# calculate the volatility for 1 year
+for(i in 2:length(data$Stock)){
+  diff[i-1] <- log(data$Stock[[i-1]]) - log(data$Stock[[i]])  # daily stock return
+  vola1[i-1] <- sd(diff) * sqrt(traidingDays[1])  # standard deviation of stock return for year 1
+  vola2[i-1] <- sd(diff) * sqrt(traidingDays[2])  # same as before for year 2
+}
+
+# store data in new column
+data$volaY1 <- vola1
+data$volaY2 <- vola2
+
+head(data, 5)
+```
+
+### days until maturity
+
+first calculate the maximum number of days this certificate can be traded.
+```{r trading days}
+emission <- as.Date(min(data$Date)) # first date for which data of certificate exists
+maturity <- as.Date("2026-08-31")    # taken from information sheet
+sum(!weekdays(seq(emission, maturity, "days"))
+    %in% c("Saturday", "Sunday"))
+```
+
+```{r maturitiy}
+# create empty vector
+durationExZ <- vector(mode = "integer", length = nrow(data))
+
+# loop to calculate the remaining duration of the certificate
+for(i in 1:length(durationExZ)){
+durationExZ[i] <- sum(!weekdays(seq(as.Date(data[[1]][i]), maturity, "days"))
+                    %in% c("Saturday", "Sunday"))/traidingDays[1]
+}
+
+# add vector as column into data frame
+data$timeRemaining <- durationExZ
+
+# define valuation dates
+valuation <- as.Date(c("2022-08-24", "2023-08-24", "2024-08-26", "2025-08-25", "2026-08-31"))
+
+# create vector 
+nextValuation <- data.frame(matrix(NA, nrow = length(data$Stock), ncol = length(valuation)))
+
+for(i in 1:length(durationExZ)){
+  for(j in 1:length(nextValuation)){
+    nextValuation[i,j] <- sum(!weekdays(seq(as.Date(data[[1]][i]), valuation[j], "days"))
+                    %in% c("Saturday", "Sunday"))
+  }
+}
+
+nextValuation <- nextValuation %>% dplyr::rename(
+  until22 = X1,
+  until23 = X2,
+  until24 = X3,
+  until25 = X4,
+  untilmaturity = X5
+)
+
+# join the two data sets
+nextValuation$Date <- data$Date
+data <- inner_join(
+  data,
+  nextValuation,
+  by = "Date"
+)
+glimpse(data)
+```
+
+### Risk free rate
+
+we use the already prepared data set from Bundesbank.
+```{r risk free}
+# load data set
+svensson <- read_csv("./data/svensson.csv")
+
+# join the data
+data <- inner_join(
+  data,
+  svensson,
+  by = "Date"
+)
+glimpse(data)
+```
+
+The risk free rate and the daily risk free rate are computed using the [Svensson parameters](https://www.nber.org/papers/w4871).
+
+```{r risk free, warning=FALSE}
+# create empty vector to fill and attach to data frame
+b1Exp <- vector(mode = "numeric", length = length(data$Stock))
+b2Exp <- vector(mode = "numeric", length = length(data$Stock))
+b3Exp <- vector(mode = "numeric", length = length(data$Stock))
+
+# calculating the risk free rate using the Svensson functional relation
+for(i in 1:nrow(data)){
+    # define the exponential components used in risk free rate calculations
+    b1Exp[i] <- (1 - exp(-data[['timeRemaining']][i]/data[['t1']][i])) / (data[['timeRemaining']][i]/data[['t1']][i])
+    b2Exp[i] <- ((1 - exp(-data[['timeRemaining']][i]/data[['t1']][i])) / (data[['timeRemaining']][i]/data[['t1']][i])) - exp(-(data[['timeRemaining']][i]/data[['t1']][i]))
+    b3Exp[i] <- ((1 - exp(-data[['timeRemaining']][i]/data[['t2']][i])) / (data[['timeRemaining']][i]/data[['t2']][i])) - exp(-(data[['timeRemaining']][i]/data[['t2']][i]))
+    # put whole function together & store values in data frame
+    data$riskFree[i] <- (data[['b0']][i]
+            + data[['b1']][i]*b1Exp 
+            + data[['b2']][i]*b2Exp 
+            + data[['b3']][i]*b3Exp) / 100
+}
+# check for missing values
+sum(is.na(data$riskFree))
+# fill missing value up with previous value
+data <- data %>% fill(riskFree)
+
+# use the risk free rate to calculate the daily rate
+data$riskFreeDaily <- data$riskFree / sqrt(traidingDays[1])
+
+head(data, 5)
+
+# save data to use later in Part 2
+write_csv(data, "./data/dataPart2.csv", col_names = TRUE)
+# join Certificate Prices
+  # Only the days during which both products exist, can be used.
+data <- inner_join(
+  data,
+  ExZ,
+  by = "Date"
+)
+
+# remove unneeded data and variables
+rm(
+  svensson,
+  b1Exp,
+  b2Exp,
+  b3Exp,
+  nextValuation,
+  durationExZ,
+  vola1,
+  vola2,
+  ExZ,
+  diff
+)
+```
+
+# valuation functions
+
+  1. function that defines payoff based on breaking the maturity barrier at evaluation dates
+    - store payoff in vector 'payoff'
+    - define payoff at maturity date
+  2. brownian motion simulation n-times for all dates until maturity.
+  3. definition of RSME for evaluation
+  
+```{r functions_setup}
+# relevant barriers taken from theoretical part
+initialStockPrice <- 48.68
+initialCertificatePrice <- 100
+coupon <- 10.15
+```
+
+### payoff
+
+The function calculates the payoff at a given valuation date given the stock price.
+A direct payoff occurs when price is above the *initialStockPrice*, for each ongoing year the reference price which has to be triggered is lowered by 10% per year relativ to the initial price.
+
+The function adds 10% to start with `index = 1` and to end at 60% of the initial price at maturity.
+The values for this equation are taken from the information sheet provided by the bank, as well as the valuation at expiration if none of the previous levels have been triggered.
+
+The calculation for value at expiration is taken from the information sheet.
+
+pricaAtDate = data frame with valuation dates to store results in
+
+```{r payoff_function}
+# payoffs at valuation date given the stock prices
+payoff <- function(payoff_df) {
+  # create vector to store values in
+  payoffResults <- vector(mode = "numeric", length = N)
+  # loop over all N columns from simulation matrix
+  for (i in 1:N) {
+    # 1st evaluation date
+    if (payoff_df[1, i] >= initialStockPrice) {
+      payoffResults[i] <- initialCertificatePrice + coupon * 1
+      next
+    }
+    # 2nd evaluation date
+    else if (payoff_df[2, i] >= initialStockPrice * (1 - 0.1)) {
+      payoffResults[i] <- initialCertificatePrice + coupon * 2
+      next
+    }
+    # 3rd evaluation date
+    else if (payoff_df[3, i] >= initialStockPrice * (1 - 0.2)) {
+      payoffResults[i] <- initialCertificatePrice + coupon * 3
+      next
+    }
+    # 4th evaluation date
+    else if (payoff_df[4, i] >= initialStockPrice * (1 - 0.3)) {
+      payoffResults[i] <- initialCertificatePrice + coupon * 4
+      next
+    }
+    # maturity data
+    else if (payoff_df[5,i] >= initialStockPrice * (1 - 0.4)) {
+      payoffResults[i] <- initialCertificatePrice + coupon * 5
+      next
+    }
+    # valuation at maturity if no redemption level has been reached
+    else {
+      payoffResults[i] <-
+        payoff_df[5, i] / initialStockPrice * initialCertificatePrice
+    }
+  }
+  return(payoffResults)
+}
+```
+
+### geometric Brownian Motion
+
+The possible paths of the certificate are simulated using a brownian motion.
+Using this method with a sufficient numbers of repetitions, the average value is centred around the price of the certificate. The created paths are put back into the payoff function and are evaluated there.
+
+```{r brown_sim}
+N = 1000  # times of repetition for paths
+
+simulation <- function(
+    startPrice,  # Stock price at start of Simulation
+    riskFreeDaily,  # svensson risk free daily rate
+    vola,  # volatility
+    T0,  # time remaining until maturity/dates to simulate
+    N,  # number of paths
+    dT = 1./365
+){
+    # create matrix of randomly drawn numbers to make vectorizing possible
+      # use seed to keep randomization consistent
+    set.seed(123)
+  randomMatrix <- matrix(rnorm(N * T0), ncol = N, nrow = T0)
+    # Brownian Motion into Price Paths
+  BM <- exp((riskFreeDaily - vola * vola / 2) * dT + vola * randomMatrix * sqrt(dT))
+  BM <- apply(rbind(rep(startPrice, N), BM), 2, cumprod)
+  return(BM)
+}
+```
+
+```{r extra_data}
+  # define days until maturity
+daysToMaturity <- vector(mode = "numeric", length = length(valuation))
+for (i in 1:length(valuation)) {
+  daysToMaturity[i] <-
+    sum(!weekdays(seq(valuation[i], maturity, "days")) %in% c("Saturday", "Sunday"))
+}
+
+# create subset for simulation purposes
+dataSim <- data[(if (nrow(data) > traidingDays[1])
+  nrow(data) - traidingDays[1]
+  else
+    1):nrow(data), c("Date", "Stock", "riskFreeDaily", "volaY1", "volaY2", "untilmaturity", "Certificate")]
+dataSim$Sim1Y <- "empty"
+dataSim$Sim2Y <- "empty"
+dataSim$SimImplVola <- "empty"
+rownames(dataSim) <- NULL
+
+write_csv(dataSim, "./data/dataSim.csv", col_names = TRUE)
+
+rm(
+  maturity,
+  emission
+)
+```
+
+# 1 year volatility
+
+pricing the Certificate using the rolling 1-year volatility of stock returns
+
+```{r 1-year-vola}
+for (i in 1:nrow(dataSim)) {
+  # define required parameters
+  startPrice <- unlist(dataSim[i, "Stock"])
+  riskFreeDaily <- unlist(dataSim[i, "riskFreeDaily"])
+  vola <- unlist(dataSim[i, "volaY1"])
+  T0 <- unlist(dataSim[i, "untilmaturity"])
+  # simulate paths using Brownian Motion using previously defined function
+  simulatedPaths <- simulation(startPrice, riskFreeDaily, vola, T0, N)
+      # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  
+  # store values used as index in matrix
+  pathsResult <- matrix(data = NA, nrow = length(daysToMaturity), ncol = N)
+
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  dataSim$Sim1Y[[i]] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+}
+dataSim$Sim1Y <- as.numeric(dataSim$Sim1Y)
+```
+
+# 2 year volatility
+
+Utilise the same function as before, with the only differences being the different `vola` variable, as well as the different column to store the values in.
+
+```{r 2-year-vola}
+for (i in 1:nrow(dataSim)) {
+  # define required parameters
+  startPrice <- unlist(dataSim[i, "Stock"])
+  riskFreeDaily <- unlist(dataSim[i, "riskFreeDaily"])
+  vola <- unlist(dataSim[i, "volaY2"])
+  T0 <- unlist(dataSim[i, "untilmaturity"])
+  # simulate paths using Brownian Motion using previously defined function
+  simulatedPaths <- simulation(startPrice, riskFreeDaily, vola, T0, N)
+      # reverse matrix for easier indexing
+  simulatedInverse <- apply(simulatedPaths, 2, rev)
+  
+  # store values used as index in matrix
+  pathsResult <- matrix(data = NA, nrow = length(daysToMaturity), ncol = N)
+
+  # extract rows for evaluation dates
+    # take number to maturity as index
+  for (k in 1:length(daysToMaturity)){
+    # for every valuation date possible store row in extra matrix
+    if (daysToMaturity[k] < nrow(simulatedInverse))
+      pathsResult[k,] <- simulatedInverse[daysToMaturity[k],]
+    # otherwise put 0 in to fail at payoff function
+    else
+      pathsResult[k,] <- 0
+  }
+  # build certificate price as mean discounted payoff from stock prices
+  dataSim$Sim2Y[[i]] <-
+    as.numeric(exp(-riskFreeDaily * (T0/240)) * mean(payoff(pathsResult), na.rm = TRUE))
+}
+dataSim$Sim2Y <- as.numeric(dataSim$Sim2Y)
+```
+
+remove unnecessary variables
+
+```{r rm_1}
+rm(
+  startPrice,
+  riskFreeDaily,
+  T0,
+  vola,
+  pathsResult,
+  simulatedInverse,
+  simulatedPaths
+)
+# manually collect garbage
+gc()
+```
+
+# Visualization
+
+### simulated vs real prices
+
+```{r sim_vs_real_plot}
+ggplot(
+  data = dataSim,
+  aes(x = Date)) +
+  geom_line(aes(y = Certificate, color = 'Market Value')) +
+  geom_line(aes(y = as.numeric(Sim1Y), color = 'Simulation - 1 year volatility')) +
+  geom_line(aes(y = as.numeric(Sim2Y), color = 'Simulation - 2 year volatility')) +
+  theme_bw(base_size = 25) +
+  theme(legend.position = c(0.8, 0.8),
+        legend.title = element_blank()) +
+  ggtitle("Valuation") +
+  xlab("Time") +
+  ylab("Price in EUR")
+
+ggsave(filename = "./figures/CertificateValuation.png", dpi = 320, width = 21, height = 7)
+```
+
+# Error statistics
+ 
+ Define all required error terms. These are root mean squared error (RMSE), mean absolute error (MAE) and error quantiles.
+
+```{r error_terms}
+  # root mean squared error
+RMSE <- function(predictedValue, trueValue){
+  sqrt(mean((predictedValue - trueValue)^2))
+}
+  # mean absolute error
+MAE <- function(predictedValue, trueValue){
+  mean(abs(predictedValue - trueValue))
+}
+  # quantiles
+ErrorQuantile <- function(predictedValue, trueValue){
+  quantile(abs(predictedValue - trueValue), probs = c(.25, .5, .75))
+}
+```
+ 
+### RMSE
+ 
+```{r rmse}
+# 1 year volatility
+RMSE(dataSim$Sim1Y, dataSim$Certificate)
+
+# 2 year volatility
+RMSE(dataSim$Sim2Y, dataSim$Certificate)
+```
+
+### MAE
+ 
+```{r mae}
+# 1 year volatility
+MAE(dataSim$Sim1Y, dataSim$Certificate)
+
+# 2 year volatility
+MAE(dataSim$Sim2Y, dataSim$Certificate)
+```
+
+### Error Quantiles
+ 
+```{r quantiles}
+# 1 year volatility
+ErrorQuantile(dataSim$Sim1Y, dataSim$Certificate)
+
+# 2 year volatility
+ErrorQuantile(dataSim$Sim2Y, dataSim$Certificate)
+```
